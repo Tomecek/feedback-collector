@@ -1,0 +1,302 @@
+import pandas as pd
+import json
+from typing import List, Dict, Optional
+from pathlib import Path
+
+
+class DataTransformer:
+    def __init__(self, df: pd.DataFrame):
+        self.df = df
+    
+    def normalize_json_columns(
+        self, 
+        json_columns: List[str], 
+        fields_to_extract: Optional[Dict[str, List[str]]] = None
+    ) -> pd.DataFrame:
+        """Normalize JSON columns into structured DataFrame columns.
+        
+        Args:
+            json_columns: List of column names containing JSON data
+            fields_to_extract: Dictionary mapping JSON columns to fields to extract
+            
+        Returns:
+            Transformed DataFrame with JSON data normalized into columns
+        """
+        self._validate_dataframe()
+        
+        extracted_data = self._extract_json_data(json_columns, fields_to_extract)
+        self._create_interleaved_columns(extracted_data, json_columns, fields_to_extract)
+        self._remove_original_columns(json_columns)
+        
+        return self.df
+    
+    def export_to_excel_by_process_type(
+        self, 
+        output_path: str, 
+        process_type_column: str = "ProcessTypeId"
+    ) -> None:
+        """Export DataFrame to Excel with separate sheets for each process type.
+        
+        Args:
+            output_path: Path to save the Excel file
+            process_type_column: Column containing process type identifiers
+        """
+        self._validate_dataframe()
+        self._validate_column_exists(process_type_column)
+        
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            for process_id, group_df in self.df.groupby(process_type_column):
+                sheet_name = self._generate_sheet_name(process_id)
+                group_df.to_excel(writer, sheet_name=sheet_name, index=False)
+                print(f"Created sheet '{sheet_name}' with {len(group_df)} rows")
+        
+        print(f"Excel file saved to: {output_path}")
+    
+    def get_process_type_summary(
+        self, 
+        process_type_column: str = "ProcessTypeId"
+    ) -> pd.DataFrame:
+        """Generate summary statistics grouped by process type.
+        
+        Args:
+            process_type_column: Column containing process type identifiers
+            
+        Returns:
+            DataFrame with summary statistics by process type
+        """
+        self._validate_column_exists(process_type_column)
+        
+        summary = self._create_base_summary(process_type_column)
+        self._add_check_column_stats(summary, process_type_column)
+        
+        return summary
+    
+    # Private helper methods
+    
+    def _validate_dataframe(self) -> None:
+        """Ensure DataFrame is loaded and valid."""
+        if self.df is None:
+            raise ValueError("DataFrame is not loaded")
+    
+    def _validate_column_exists(self, column_name: str) -> None:
+        """Check if specified column exists in DataFrame."""
+        if column_name not in self.df.columns:
+            raise ValueError(f"Column '{column_name}' not found in DataFrame")
+    
+    def _extract_json_data(
+        self, 
+        json_columns: List[str], 
+        fields_to_extract: Dict[str, List[str]]
+    ) -> Dict[str, List]:
+        """Extract data from JSON columns."""
+        extracted_data = {}
+        
+        for column in json_columns:
+            try:
+                parsed_json = self._parse_json_column(column)
+                
+                if fields_to_extract and column in fields_to_extract:
+                    column_data = self._extract_fields_from_json(
+                        parsed_json, 
+                        fields_to_extract[column]
+                    )
+                    extracted_data[column] = column_data
+                    
+            except Exception as e:
+                print(f"Error processing column '{column}': {e}")
+        
+        return extracted_data
+    
+    def _parse_json_column(self, column: str) -> pd.Series:
+        """Parse JSON data in a column."""
+        return self.df[column].dropna().apply(json.loads)
+    
+    def _extract_fields_from_json(
+        self, 
+        parsed_json: pd.Series, 
+        fields: List[str]
+    ) -> List[List[Dict]]:
+        """Extract specified fields from parsed JSON data."""
+        column_data = []
+        
+        for idx in self.df.index:
+            row_data = []
+            
+            if idx in parsed_json.index:
+                json_data = parsed_json[idx]
+                row_data = self._extract_attributes(json_data, fields)
+            
+            column_data.append(row_data)
+        
+        return column_data
+    
+    def _extract_attributes(
+        self, 
+        json_data: Dict, 
+        fields: List[str]
+    ) -> List[Dict]:
+        """Extract attributes from JSON data."""
+        extracted = []
+        
+        if 'Attributes' in json_data:
+            for attr_value in json_data['Attributes'].values():
+                field_data = {
+                    field: attr_value.get(field.lower())
+                    for field in fields
+                    if field.lower() in attr_value
+                }
+                if field_data:
+                    extracted.append(field_data)
+        
+        return extracted
+    
+    def _create_interleaved_columns(
+        self, 
+        extracted_data: Dict[str, List], 
+        json_columns: List[str], 
+        fields_to_extract: Dict[str, List[str]]
+    ) -> None:
+        """Create interleaved columns from extracted JSON data."""
+        for idx in self.df.index:
+            max_pairs = self._get_max_pairs_for_row(extracted_data, json_columns, idx)
+            
+            for pair_num in range(max_pairs):
+                self._process_data_pair(
+                    extracted_data, 
+                    json_columns, 
+                    fields_to_extract, 
+                    idx, 
+                    pair_num
+                )
+    
+    def _get_max_pairs_for_row(
+        self, 
+        extracted_data: Dict[str, List], 
+        json_columns: List[str], 
+        row_idx: int
+    ) -> int:
+        """Get maximum number of data pairs for a row across all columns."""
+        return max(
+            (len(extracted_data[col][row_idx]) for col in json_columns if col in extracted_data),
+            default=0
+        )
+    
+    def _process_data_pair(
+        self, 
+        extracted_data: Dict[str, List], 
+        json_columns: List[str], 
+        fields_to_extract: Dict[str, List[str]], 
+        row_idx: int, 
+        pair_num: int
+    ) -> None:
+        """Process a single data pair and add columns to DataFrame."""
+        initial_answer = None
+        ai_answer = None
+        
+        for column in json_columns:
+            if column in extracted_data and column in fields_to_extract:
+                row_pairs = extracted_data[column][row_idx]
+                
+                if pair_num < len(row_pairs):
+                    pair_data = row_pairs[pair_num]
+                    self._add_pair_columns(column, pair_data, row_idx, pair_num)
+                    
+                    # Track answers for comparison
+                    if column == "InitialData" and 'answer' in pair_data:
+                        initial_answer = pair_data['answer']
+                    elif column == "DataAI" and 'answer' in pair_data:
+                        ai_answer = pair_data['answer']
+        
+        self._add_comparison_column(row_idx, pair_num, initial_answer, ai_answer)
+    
+    def _add_pair_columns(
+        self, 
+        column: str, 
+        pair_data: Dict, 
+        row_idx: int, 
+        pair_num: int
+    ) -> None:
+        """Add columns for a single data pair."""
+        for field, value in pair_data.items():
+            col_name = f"{column}_{field.lower()}{pair_num + 1}"
+            self.df.at[row_idx, col_name] = value
+    
+    def _add_comparison_column(
+        self, 
+        row_idx: int, 
+        pair_num: int, 
+        initial_answer: Optional[str], 
+        ai_answer: Optional[str]
+    ) -> None:
+        """Add comparison result column if both answers exist."""
+        if initial_answer is not None and ai_answer is not None:
+            check_col = f"Check{pair_num + 1}"
+            self.df.at[row_idx, check_col] = (
+                "OK" if self._answers_match(initial_answer, ai_answer) else "KO"
+            )
+    
+    def _answers_match(self, answer1: str, answer2: str) -> bool:
+        """Compare two answers for equality (case and whitespace insensitive)."""
+        return str(answer1).strip().lower() == str(answer2).strip().lower()
+    
+    def _remove_original_columns(self, columns_to_remove: List[str]) -> None:
+        """Remove original columns from DataFrame."""
+        for column in columns_to_remove:
+            if column in self.df.columns:
+                self.df.drop(columns=[column], inplace=True)
+    
+    def _generate_sheet_name(self, process_id: str) -> str:
+        """Generate valid Excel sheet name from process ID."""
+        sheet_name = f"ProcessType_{process_id}"[:31]  # Excel limit
+        return "".join(c for c in sheet_name if c.isalnum() or c in (' ', '_', '-'))
+    
+    def _create_base_summary(self, group_column: str) -> pd.DataFrame:
+        """Create base summary DataFrame grouped by specified column."""
+        return self.df.groupby(group_column).agg({
+            group_column: 'count'
+        }).rename(columns={group_column: 'Row_Count'})
+    
+    def _add_check_column_stats(
+        self, 
+        summary_df: pd.DataFrame, 
+        group_column: str
+    ) -> None:
+        """Add check column statistics to summary DataFrame."""
+        check_columns = [col for col in self.df.columns if col.startswith('Check')]
+        
+        for check_col in check_columns:
+            ok_count = self.df.groupby(group_column)[check_col].apply(
+                lambda x: (x == 'OK').sum()
+            )
+            ko_count = self.df.groupby(group_column)[check_col].apply(
+                lambda x: (x == 'KO').sum()
+            )
+            summary_df[f'{check_col}_OK'] = ok_count
+            summary_df[f'{check_col}_KO'] = ko_count
+
+
+# Usage example remains the same
+def example_usage():
+    loader = DataLoader(Path(GLOBAL_PATH))
+    df = loader.load_csv()
+    transformer = DataTransformer(df)
+    
+    # Transform the data
+    df_transformed = transformer.normalize_json_columns(
+        json_columns=["InitialData", "DataAI"],
+        fields_to_extract={
+            "InitialData": ["Title", "Answer"],
+            "DataAI": ["Answer"]
+        }
+    )
+    
+    # Get summary by process type
+    summary = transformer.get_process_type_summary()
+    print("Summary by ProcessType:")
+    print(summary)
+    
+    # Export to Excel with separate sheets
+    output_file = "processed_data_by_type.xlsx"
+    transformer.export_to_excel_by_process_type(output_file)
+    
+    return df_transformed
