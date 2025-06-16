@@ -1,0 +1,182 @@
+import pandas as pd
+import json
+from typing import List, Dict
+from pathlib import Path
+
+class DataTransformer:
+    def __init__(self, df: pd.DataFrame):
+        self.df = df
+    
+    def normalize_json_cols(self, cols: List[str], fields_per_col: Dict[str, List[str]] = None) -> pd.DataFrame:
+        if self.df is None:
+            raise ValueError("Data didn't load")
+        
+        # First, extract all data from all columns
+        all_extracted = {}
+        
+        for col in cols:
+            try:
+                # Parse JSON
+                parsed = self.df[col].dropna().apply(json.loads)
+                
+                if fields_per_col and col in fields_per_col:
+                    # For each row, extract ALL pairs
+                    col_data = []
+                    
+                    for idx in self.df.index:
+                        row_pairs = []
+                        
+                        if idx in parsed.index:
+                            data = parsed[idx]
+                            
+                            if 'Attributes' in data:
+                                for attr_key, attr_value in data['Attributes'].items():
+                                    pair_data = {}
+                                    for field in fields_per_col[col]:
+                                        field_lower = field.lower()
+                                        if field_lower in attr_value:
+                                            pair_data[field] = attr_value[field_lower]
+                                    if pair_data:
+                                        row_pairs.append(pair_data)
+                        
+                        col_data.append(row_pairs)
+                    
+                    all_extracted[col] = col_data
+                        
+            except Exception as e:
+                print(f"Error with col '{col}': {e}")
+        
+        # Now create interleaved columns with Check columns
+        for idx in self.df.index:
+            # Find max pairs for this row across all columns
+            max_pairs = 0
+            for col in cols:
+                if col in all_extracted:
+                    max_pairs = max(max_pairs, len(all_extracted[col][idx]))
+            
+            # Create interleaved columns for this row
+            for pair_num in range(max_pairs):
+                # Store values for comparison
+                initial_answer = None
+                ai_answer = None
+                
+                # Add columns for each field in each column
+                for col in cols:
+                    if col in all_extracted and col in fields_per_col:
+                        row_pairs = all_extracted[col][idx]
+                        if pair_num < len(row_pairs):
+                            pair_data = row_pairs[pair_num]
+                            for field, value in pair_data.items():
+                                col_name = f"{col}_{field.lower()}{pair_num + 1}"
+                                self.df.at[idx, col_name] = value
+                                
+                                # Store answer values for comparison
+                                if col == "InitialData" and field.lower() == "answer":
+                                    initial_answer = value
+                                elif col == "DataAI" and field.lower() == "answer":
+                                    ai_answer = value
+                
+                # Add Check column after each complete pair
+                if initial_answer is not None and ai_answer is not None:
+                    check_col_name = f"Check{pair_num + 1}"
+                    # Compare answers (you can customize this comparison logic)
+                    if str(initial_answer).strip().lower() == str(ai_answer).strip().lower():
+                        self.df.at[idx, check_col_name] = "OK"
+                    else:
+                        self.df.at[idx, check_col_name] = "KO"
+        
+        # Drop original JSON columns
+        for col in cols:
+            if col in self.df.columns:
+                self.df = self.df.drop(columns=[col])
+        
+        return self.df
+    
+    def export_to_excel_by_process_type(self, output_path: str, process_type_col: str = "ProcessTypeId"):
+        """
+        Export dataframe to Excel with separate sheets based on ProcessTypeId
+        
+        Args:
+            output_path: Path where to save the Excel file
+            process_type_col: Column name that contains the process type identifier
+        """
+        if self.df is None:
+            raise ValueError("No data to export")
+        
+        if process_type_col not in self.df.columns:
+            raise ValueError(f"Column '{process_type_col}' not found in dataframe")
+        
+        # Create Excel writer
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            # Group by ProcessTypeId
+            grouped = self.df.groupby(process_type_col)
+            
+            for process_id, group_df in grouped:
+                # Create sheet name (Excel sheet names have limitations)
+                sheet_name = f"ProcessType_{process_id}"
+                
+                # Ensure sheet name is valid (max 31 chars, no special chars)
+                sheet_name = str(sheet_name)[:31]
+                sheet_name = "".join(c for c in sheet_name if c.isalnum() or c in (' ', '_', '-'))
+                
+                # Export group to sheet
+                group_df.to_excel(writer, sheet_name=sheet_name, index=False)
+                
+                print(f"Created sheet '{sheet_name}' with {len(group_df)} rows")
+        
+        print(f"Excel file saved to: {output_path}")
+    
+    def get_process_type_summary(self, process_type_col: str = "ProcessTypeId") -> pd.DataFrame:
+        """
+        Get summary of data by ProcessTypeId
+        
+        Args:
+            process_type_col: Column name that contains the process type identifier
+            
+        Returns:
+            DataFrame with summary statistics by process type
+        """
+        if process_type_col not in self.df.columns:
+            raise ValueError(f"Column '{process_type_col}' not found in dataframe")
+        
+        summary = self.df.groupby(process_type_col).agg({
+            process_type_col: 'count'  # Count rows
+        }).rename(columns={process_type_col: 'Row_Count'})
+        
+        # Add check column statistics if they exist
+        check_cols = [col for col in self.df.columns if col.startswith('Check')]
+        if check_cols:
+            for check_col in check_cols:
+                ok_count = self.df.groupby(process_type_col)[check_col].apply(lambda x: (x == 'OK').sum())
+                ko_count = self.df.groupby(process_type_col)[check_col].apply(lambda x: (x == 'KO').sum())
+                summary[f'{check_col}_OK'] = ok_count
+                summary[f'{check_col}_KO'] = ko_count
+        
+        return summary
+
+# Usage example:
+def example_usage():
+    # Your existing code
+    loader = DataLoader(Path(GLOBAL_PATH))
+    df = loader.load_csv()
+    transformer = DataTransformer(df)
+    
+    # Transform the data
+    df_transformed = transformer.normalize_json_cols(
+        cols=["InitialData", "DataAI"],
+        fields_per_col={
+            "InitialData": ["Title", "Answer"],
+            "DataAI": ["Answer"]
+        }
+    )
+    
+    # Get summary by process type
+    summary = transformer.get_process_type_summary()
+    print("Summary by ProcessType:")
+    print(summary)
+    
+    # Export to Excel with separate sheets
+    output_file = "processed_data_by_type.xlsx"
+    transformer.export_to_excel_by_process_type(output_file)
+    
+    return df_transformed
