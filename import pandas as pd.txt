@@ -1,0 +1,297 @@
+import pandas as pd
+import numpy as np
+from typing import Dict, List, Tuple
+from pathlib import Path
+import re
+
+class ExcelMetricsGenerator:
+    def __init__(self, df: pd.DataFrame, type_id_col: str = "ProcessTypeId"):
+        self.df = df.copy()
+        self.type_id_col = type_id_col
+        self.metrics_data = {}
+    
+    def rename_columns(self, column_mapping: Dict[str, str] = None) -> pd.DataFrame:
+        """
+        Rename columns with custom mapping
+        
+        Args:
+            column_mapping: Dictionary mapping old names to new names
+                          If None, uses default mapping
+        """
+        if column_mapping is None:
+            # Default column renaming
+            column_mapping = {
+                'InitialData': 'Expected',
+                'DataAI': 'Actual',
+                'title': 'Question',
+                'answer': 'Answer'
+            }
+        
+        # Apply renaming to all columns
+        new_columns = {}
+        for col in self.df.columns:
+            new_col = col
+            for old_part, new_part in column_mapping.items():
+                new_col = new_col.replace(old_part, new_part)
+            new_columns[col] = new_col
+        
+        self.df = self.df.rename(columns=new_columns)
+        return self.df
+    
+    def detect_pairs_structure(self) -> Dict[str, int]:
+        """
+        Detect how many title-answer pairs each TypeId has
+        
+        Returns:
+            Dictionary with TypeId as key and max pairs count as value
+        """
+        pairs_per_type = {}
+        
+        for type_id in self.df[self.type_id_col].unique():
+            type_df = self.df[self.df[self.type_id_col] == type_id]
+            
+            # Count Check columns to determine number of pairs
+            check_cols = [col for col in type_df.columns if col.startswith('Check')]
+            max_pairs = len(check_cols)
+            
+            # Alternative: count by pattern matching
+            if max_pairs == 0:
+                title_cols = [col for col in type_df.columns if 'title' in col.lower()]
+                max_pairs = len(title_cols)
+            
+            pairs_per_type[type_id] = max_pairs
+            
+        return pairs_per_type
+    
+    def calculate_metrics_by_type(self) -> Dict:
+        """
+        Calculate detailed metrics for each TypeId
+        
+        Returns:
+            Dictionary with metrics for each type
+        """
+        pairs_structure = self.detect_pairs_structure()
+        
+        for type_id in self.df[self.type_id_col].unique():
+            type_df = self.df[self.df[self.type_id_col] == type_id]
+            max_pairs = pairs_structure[type_id]
+            
+            type_metrics = {
+                'total_rows': len(type_df),
+                'total_pairs': max_pairs,
+                'total_comparisons': len(type_df) * max_pairs,
+                'pair_metrics': {},
+                'overall_accuracy': 0,
+                'detailed_results': []
+            }
+            
+            total_matches = 0
+            total_valid_comparisons = 0
+            
+            # Calculate metrics for each pair
+            for pair_num in range(1, max_pairs + 1):
+                check_col = f"Check{pair_num}"
+                
+                if check_col in type_df.columns:
+                    # Count OK/KO for this pair
+                    ok_count = (type_df[check_col] == 'OK').sum()
+                    ko_count = (type_df[check_col] == 'KO').sum()
+                    na_count = type_df[check_col].isna().sum()
+                    
+                    pair_accuracy = ok_count / (ok_count + ko_count) if (ok_count + ko_count) > 0 else 0
+                    
+                    type_metrics['pair_metrics'][f'Pair_{pair_num}'] = {
+                        'matches': ok_count,
+                        'mismatches': ko_count,
+                        'missing': na_count,
+                        'accuracy': pair_accuracy
+                    }
+                    
+                    total_matches += ok_count
+                    total_valid_comparisons += (ok_count + ko_count)
+            
+            # Calculate overall accuracy
+            type_metrics['overall_accuracy'] = total_matches / total_valid_comparisons if total_valid_comparisons > 0 else 0
+            type_metrics['total_matches'] = total_matches
+            type_metrics['total_mismatches'] = total_valid_comparisons - total_matches
+            
+            self.metrics_data[type_id] = type_metrics
+        
+        return self.metrics_data
+    
+    def create_metrics_summary_df(self) -> pd.DataFrame:
+        """
+        Create a summary DataFrame with metrics for all types
+        """
+        if not self.metrics_data:
+            self.calculate_metrics_by_type()
+        
+        summary_rows = []
+        
+        for type_id, metrics in self.metrics_data.items():
+            row = {
+                'TypeId': type_id,
+                'Total_Rows': metrics['total_rows'],
+                'Total_Pairs': metrics['total_pairs'],
+                'Total_Comparisons': metrics['total_comparisons'],
+                'Total_Matches': metrics['total_matches'],
+                'Total_Mismatches': metrics['total_mismatches'],
+                'Overall_Accuracy': f"{metrics['overall_accuracy']:.2%}"
+            }
+            
+            # Add pair-specific metrics
+            for pair_name, pair_metrics in metrics['pair_metrics'].items():
+                row[f'{pair_name}_Accuracy'] = f"{pair_metrics['accuracy']:.2%}"
+                row[f'{pair_name}_Matches'] = pair_metrics['matches']
+                row[f'{pair_name}_Mismatches'] = pair_metrics['mismatches']
+            
+            summary_rows.append(row)
+        
+        return pd.DataFrame(summary_rows)
+    
+    def create_detailed_metrics_df(self, type_id) -> pd.DataFrame:
+        """
+        Create detailed metrics DataFrame for a specific TypeId
+        """
+        if not self.metrics_data:
+            self.calculate_metrics_by_type()
+        
+        type_df = self.df[self.df[self.type_id_col] == type_id].copy()
+        
+        # Add row-level metrics
+        type_df['Row_Accuracy'] = 0.0
+        type_df['Row_Matches'] = 0
+        type_df['Row_Total_Pairs'] = 0
+        
+        for idx in type_df.index:
+            matches = 0
+            total_pairs = 0
+            
+            check_cols = [col for col in type_df.columns if col.startswith('Check')]
+            for check_col in check_cols:
+                if pd.notna(type_df.loc[idx, check_col]):
+                    total_pairs += 1
+                    if type_df.loc[idx, check_col] == 'OK':
+                        matches += 1
+            
+            type_df.loc[idx, 'Row_Matches'] = matches
+            type_df.loc[idx, 'Row_Total_Pairs'] = total_pairs
+            type_df.loc[idx, 'Row_Accuracy'] = matches / total_pairs if total_pairs > 0 else 0
+        
+        return type_df
+    
+    def export_to_excel(self, output_path: str, include_metrics: bool = True):
+        """
+        Export data to Excel with separate sheets for each TypeId and metrics
+        
+        Args:
+            output_path: Path to save Excel file
+            include_metrics: Whether to include metrics sheets
+        """
+        if not self.metrics_data:
+            self.calculate_metrics_by_type()
+        
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            
+            # Create data sheets for each TypeId
+            for type_id in self.df[self.type_id_col].unique():
+                # Create main data sheet
+                type_df = self.df[self.df[self.type_id_col] == type_id]
+                sheet_name = f"Type_{type_id}_Data"[:31]
+                type_df.to_excel(writer, sheet_name=sheet_name, index=False)
+                
+                # Create detailed metrics sheet for this type
+                if include_metrics:
+                    detailed_df = self.create_detailed_metrics_df(type_id)
+                    detail_sheet_name = f"Type_{type_id}_Details"[:31]
+                    detailed_df.to_excel(writer, sheet_name=detail_sheet_name, index=False)
+            
+            # Create overall metrics summary sheet
+            if include_metrics:
+                summary_df = self.create_metrics_summary_df()
+                summary_df.to_excel(writer, sheet_name="Metrics_Summary", index=False)
+                
+                # Create pair comparison matrix
+                self._create_pair_comparison_sheet(writer)
+        
+        print(f"Excel file exported to: {output_path}")
+        print(f"Created sheets for {len(self.df[self.type_id_col].unique())} different TypeIds")
+    
+    def _create_pair_comparison_sheet(self, writer):
+        """
+        Create a sheet showing pair-by-pair comparison across all types
+        """
+        comparison_data = []
+        
+        for type_id, metrics in self.metrics_data.items():
+            for pair_name, pair_metrics in metrics['pair_metrics'].items():
+                comparison_data.append({
+                    'TypeId': type_id,
+                    'Pair': pair_name,
+                    'Matches': pair_metrics['matches'],
+                    'Mismatches': pair_metrics['mismatches'],
+                    'Missing': pair_metrics['missing'],
+                    'Accuracy': f"{pair_metrics['accuracy']:.2%}"
+                })
+        
+        if comparison_data:
+            comparison_df = pd.DataFrame(comparison_data)
+            comparison_df.to_excel(writer, sheet_name="Pair_Comparison", index=False)
+    
+    def print_summary(self):
+        """
+        Print a summary of the metrics
+        """
+        if not self.metrics_data:
+            self.calculate_metrics_by_type()
+        
+        print("\n=== METRICS SUMMARY ===")
+        for type_id, metrics in self.metrics_data.items():
+            print(f"\nTypeId {type_id}:")
+            print(f"  - Total Rows: {metrics['total_rows']}")
+            print(f"  - Total Pairs per Row: {metrics['total_pairs']}")
+            print(f"  - Overall Accuracy: {metrics['overall_accuracy']:.2%}")
+            print(f"  - Total Matches: {metrics['total_matches']}")
+            print(f"  - Total Mismatches: {metrics['total_mismatches']}")
+            
+            print("  - Pair-level Accuracy:")
+            for pair_name, pair_metrics in metrics['pair_metrics'].items():
+                print(f"    {pair_name}: {pair_metrics['accuracy']:.2%} ({pair_metrics['matches']}/{pair_metrics['matches'] + pair_metrics['mismatches']})")
+
+# Usage example
+def example_usage():
+    # After your DataTransformer processing
+    loader = DataLoader(Path(GLOBAL_PATH))
+    df = loader.load_csv()
+    transformer = DataTransformer(df)
+    
+    # Transform the data
+    df_transformed = transformer.normalize_json_cols(
+        cols=["InitialData", "DataAI"],
+        fields_per_col={
+            "InitialData": ["Title", "Answer"],
+            "DataAI": ["Answer"]
+        }
+    )
+    
+    # Create metrics generator
+    metrics_gen = ExcelMetricsGenerator(df_transformed)
+    
+    # Rename columns for better readability
+    metrics_gen.rename_columns({
+        'InitialData': 'Expected',
+        'DataAI': 'Predicted',
+        'title': 'Question',
+        'answer': 'Answer'
+    })
+    
+    # Calculate metrics
+    metrics_gen.calculate_metrics_by_type()
+    
+    # Print summary
+    metrics_gen.print_summary()
+    
+    # Export to Excel
+    metrics_gen.export_to_excel("analysis_results.xlsx")
+    
+    return metrics_gen
