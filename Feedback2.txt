@@ -1,0 +1,499 @@
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import re
+from collections import Counter
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import KMeans
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+class ChatbotAnalytics:
+    def __init__(self, csv_file_path):
+        """Initialize with CSV file path"""
+        self.df = pd.read_csv(csv_file_path)
+        self.prepare_data()
+        
+    def prepare_data(self):
+        """Clean and prepare data for analysis"""
+        # Convert dates
+        self.df['created_date'] = pd.to_datetime(self.df['created_date'])
+        self.df['modified_date'] = pd.to_datetime(self.df['modified_date'])
+        
+        # Add time-based columns
+        self.df['week'] = self.df['created_date'].dt.isocalendar().week
+        self.df['month'] = self.df['created_date'].dt.month
+        self.df['day_of_week'] = self.df['created_date'].dt.day_name()
+        self.df['hour'] = self.df['created_date'].dt.hour
+        
+        # Clean question text
+        self.df['question_clean'] = self.df['question'].str.lower().str.strip()
+        self.df['question_length'] = self.df['question'].str.len()
+        self.df['output_length'] = self.df['output'].str.len()
+        
+    def classify_questions_rule_based(self):
+        """Simple rule-based question classification"""
+        def categorize_question(question):
+            question = question.lower()
+            
+            # Define category keywords
+            categories = {
+                'Technical Support': ['error', 'bug', 'issue', 'problem', 'fix', 'troubleshoot', 'help'],
+                'How-to/Tutorial': ['how to', 'how do', 'tutorial', 'guide', 'step', 'instructions'],
+                'Information Request': ['what is', 'what are', 'explain', 'define', 'tell me about'],
+                'Code/Development': ['code', 'python', 'sql', 'javascript', 'programming', 'function', 'script'],
+                'Data/Analytics': ['data', 'report', 'analysis', 'dashboard', 'metrics', 'statistics'],
+                'Policy/Process': ['policy', 'procedure', 'process', 'workflow', 'approval', 'guidelines'],
+                'Other': []
+            }
+            
+            for category, keywords in categories.items():
+                if any(keyword in question for keyword in keywords):
+                    return category
+            return 'Other'
+        
+        self.df['question_category'] = self.df['question_clean'].apply(categorize_question)
+        return self.df['question_category'].value_counts()
+    
+    def classify_questions_ml(self, n_clusters=8):
+        """ML-based question clustering for automatic categorization"""
+        # Vectorize questions
+        vectorizer = TfidfVectorizer(
+            max_features=100, 
+            stop_words='english', 
+            ngram_range=(1, 2)
+        )
+        
+        question_vectors = vectorizer.fit_transform(self.df['question_clean'].fillna(''))
+        
+        # Cluster questions
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+        clusters = kmeans.fit_predict(question_vectors)
+        
+        self.df['question_cluster'] = clusters
+        
+        # Get top terms for each cluster to understand themes
+        feature_names = vectorizer.get_feature_names_out()
+        cluster_terms = {}
+        
+        for i in range(n_clusters):
+            top_terms = [feature_names[idx] for idx in kmeans.cluster_centers_[i].argsort()[-5:][::-1]]
+            cluster_terms[f'Cluster_{i}'] = top_terms
+            
+        return cluster_terms
+    
+    def calculate_effectiveness_metrics(self):
+        """Calculate effectiveness metrics beyond user satisfaction"""
+        metrics = {}
+        
+        # Response time (if available)
+        if 'modified_date' in self.df.columns:
+            self.df['response_time'] = (self.df['modified_date'] - self.df['created_date']).dt.total_seconds()
+            metrics['avg_response_time'] = self.df['response_time'].mean()
+        
+        # Question complexity (based on length and keywords)
+        complex_keywords = ['integrate', 'implement', 'architecture', 'optimization', 'algorithm']
+        self.df['is_complex'] = self.df['question_clean'].str.contains('|'.join(complex_keywords))
+        
+        # Output quality indicators
+        self.df['output_has_code'] = self.df['output'].str.contains('```|def |class |import ', na=False)
+        self.df['output_has_links'] = self.df['output'].str.contains('http|www\.', na=False)
+        
+        # Question repetition (similar questions might indicate unclear answers)
+        question_similarity = self.df.groupby('question_clean').size()
+        repeated_questions = question_similarity[question_similarity > 1]
+        metrics['repeated_questions_ratio'] = len(repeated_questions) / len(question_similarity)
+        
+        # User engagement (users asking follow-up questions)
+        user_question_counts = self.df.groupby('user').size()
+        metrics['avg_questions_per_user'] = user_question_counts.mean()
+        metrics['power_users'] = len(user_question_counts[user_question_counts >= 5])
+        
+        return metrics
+    
+    def generate_weekly_report(self):
+        """Generate comprehensive weekly report"""
+        current_week = datetime.now().isocalendar().week
+        week_data = self.df[self.df['week'] == current_week]
+        
+        report = {
+            'period': f"Week {current_week}",
+            'total_interactions': len(week_data),
+            'unique_users': week_data['user'].nunique(),
+            'new_users': self.calculate_new_users(week_data),
+            'top_categories': week_data['question_category'].value_counts().head(5).to_dict(),
+            'peak_hours': week_data.groupby('hour').size().idxmax(),
+            'avg_satisfaction': week_data['user_satisfaction'].mean() if 'user_satisfaction' in week_data.columns else None
+        }
+        
+        return report
+    
+    def calculate_new_users(self, current_period_data):
+        """Calculate new users in current period"""
+        current_users = set(current_period_data['user'].unique())
+        historical_users = set(self.df[self.df['created_date'] < current_period_data['created_date'].min()]['user'].unique())
+        return len(current_users - historical_users)
+    
+    def calculate_economic_impact(self, hourly_rate=50):
+        """Calculate economic benefit based on time saved"""
+        # Estimate time saved per interaction (average 15 minutes)
+        time_saved_per_question = 15  # minutes
+        
+        total_questions = len(self.df)
+        unique_users = self.df['user'].nunique()
+        
+        economic_metrics = {
+            'total_time_saved_hours': (total_questions * time_saved_per_question) / 60,
+            'total_economic_value': (total_questions * time_saved_per_question * hourly_rate) / 60,
+            'value_per_user': ((total_questions * time_saved_per_question * hourly_rate) / 60) / unique_users,
+            'avg_interactions_per_user': total_questions / unique_users
+        }
+        
+        return economic_metrics
+    
+    def create_dashboard_data(self):
+        """Prepare data for dashboard visualization"""
+        dashboard_data = {
+            'usage_trends': self.df.groupby(self.df['created_date'].dt.date).size().reset_index(),
+            'category_distribution': self.df['question_category'].value_counts().reset_index(),
+            'user_activity': self.df.groupby('user').size().reset_index(name='question_count'),
+            'hourly_pattern': self.df.groupby('hour').size().reset_index(name='interactions'),
+            'weekly_pattern': self.df.groupby('day_of_week').size().reset_index(name='interactions')
+        }
+        
+        return dashboard_data
+    
+    def export_reports(self, output_dir='reports'):
+        """Export various reports to files"""
+        import os
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Weekly summary
+        weekly_report = self.generate_weekly_report()
+        pd.Series(weekly_report).to_csv(f"{output_dir}/weekly_summary.csv")
+        
+        # Question categories
+        category_analysis = self.df.groupby('question_category').agg({
+            'id': 'count',
+            'user': 'nunique',
+            'question_length': 'mean',
+            'output_length': 'mean'
+        }).round(2)
+        category_analysis.to_csv(f"{output_dir}/category_analysis.csv")
+        
+        # User engagement
+        user_engagement = self.df.groupby('user').agg({
+            'id': 'count',
+            'created_date': ['min', 'max'],
+            'question_category': lambda x: x.value_counts().index[0]  # most common category
+        }).round(2)
+        user_engagement.to_csv(f"{output_dir}/user_engagement.csv")
+        
+        # Economic impact
+        economic_impact = self.calculate_economic_impact()
+        pd.Series(economic_impact).to_csv(f"{output_dir}/economic_impact.csv")
+
+# Usage example
+def main():
+    # Initialize analytics
+    analytics = ChatbotAnalytics('chatbot_usage.csv')
+    
+    # Classify questions
+    print("Question Categories:")
+    categories = analytics.classify_questions_rule_based()
+    print(categories)
+    
+    # ML-based clustering
+    print("\nML-based Question Clusters:")
+    clusters = analytics.classify_questions_ml()
+    for cluster, terms in clusters.items():
+        print(f"{cluster}: {', '.join(terms)}")
+    
+    # Calculate effectiveness
+    print("\nEffectiveness Metrics:")
+    effectiveness = analytics.calculate_effectiveness_metrics()
+    for metric, value in effectiveness.items():
+        print(f"{metric}: {value}")
+    
+    # Generate reports
+    weekly_report = analytics.generate_weekly_report()
+    print(f"\nWeekly Report: {weekly_report}")
+    
+    # Economic impact
+    economic_impact = analytics.calculate_economic_impact()
+    print(f"\nEconomic Impact: {economic_impact}")
+    
+    # Export all reports
+    analytics.export_reports()
+    print("\nReports exported to 'reports' directory")
+
+if __name__ == "__main__":
+    main()
+
+
+
+#################
+#################
+#################
+#################
+
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from datetime import datetime, timedelta
+
+def create_simple_dashboard(df):
+    """Create a simple dashboard with key metrics"""
+    
+    # Set up the plotting style
+    plt.style.use('seaborn-v0_8')
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig.suptitle('AI Chatbot Usage Analytics Dashboard', fontsize=16, fontweight='bold')
+    
+    # 1. Daily Usage Trend
+    daily_usage = df.groupby(df['created_date'].dt.date).size()
+    axes[0, 0].plot(daily_usage.index, daily_usage.values, marker='o', linewidth=2)
+    axes[0, 0].set_title('Daily Usage Trend')
+    axes[0, 0].set_xlabel('Date')
+    axes[0, 0].set_ylabel('Number of Interactions')
+    axes[0, 0].tick_params(axis='x', rotation=45)
+    
+    # 2. Question Categories
+    category_counts = df['question_category'].value_counts()
+    axes[0, 1].pie(category_counts.values, labels=category_counts.index, autopct='%1.1f%%')
+    axes[0, 1].set_title('Question Categories Distribution')
+    
+    # 3. Unique Users per Week
+    weekly_users = df.groupby(df['created_date'].dt.isocalendar().week)['user'].nunique()
+    axes[0, 2].bar(weekly_users.index, weekly_users.values, color='skyblue')
+    axes[0, 2].set_title('Unique Users per Week')
+    axes[0, 2].set_xlabel('Week Number')
+    axes[0, 2].set_ylabel('Unique Users')
+    
+    # 4. Hourly Usage Pattern
+    hourly_usage = df.groupby('hour').size()
+    axes[1, 0].bar(hourly_usage.index, hourly_usage.values, color='lightcoral')
+    axes[1, 0].set_title('Usage by Hour of Day')
+    axes[1, 0].set_xlabel('Hour')
+    axes[1, 0].set_ylabel('Number of Interactions')
+    
+    # 5. User Engagement (Questions per user)
+    user_questions = df.groupby('user').size()
+    axes[1, 1].hist(user_questions.values, bins=20, color='lightgreen', alpha=0.7)
+    axes[1, 1].set_title('Questions per User Distribution')
+    axes[1, 1].set_xlabel('Number of Questions')
+    axes[1, 1].set_ylabel('Number of Users')
+    
+    # 6. Question Length Distribution
+    axes[1, 2].hist(df['question_length'], bins=20, color='plum', alpha=0.7)
+    axes[1, 2].set_title('Question Length Distribution')
+    axes[1, 2].set_xlabel('Question Length (characters)')
+    axes[1, 2].set_ylabel('Frequency')
+    
+    plt.tight_layout()
+    plt.savefig('chatbot_dashboard.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+def create_interactive_dashboard(df):
+    """Create an interactive Plotly dashboard"""
+    
+    # Create subplots
+    fig = make_subplots(
+        rows=3, cols=2,
+        subplot_titles=('Daily Usage Trend', 'Question Categories', 
+                       'Weekly Unique Users', 'Hourly Usage Pattern',
+                       'User Engagement', 'Economic Impact'),
+        specs=[[{"secondary_y": False}, {"type": "pie"}],
+               [{"secondary_y": False}, {"secondary_y": False}],
+               [{"secondary_y": False}, {"secondary_y": False}]]
+    )
+    
+    # 1. Daily Usage Trend
+    daily_usage = df.groupby(df['created_date'].dt.date).size().reset_index()
+    daily_usage.columns = ['date', 'interactions']
+    
+    fig.add_trace(
+        go.Scatter(x=daily_usage['date'], y=daily_usage['interactions'],
+                  mode='lines+markers', name='Daily Interactions'),
+        row=1, col=1
+    )
+    
+    # 2. Question Categories Pie Chart
+    category_counts = df['question_category'].value_counts()
+    fig.add_trace(
+        go.Pie(labels=category_counts.index, values=category_counts.values,
+               name="Categories"),
+        row=1, col=2
+    )
+    
+    # 3. Weekly Unique Users
+    weekly_users = df.groupby(df['created_date'].dt.isocalendar().week)['user'].nunique().reset_index()
+    weekly_users.columns = ['week', 'unique_users']
+    
+    fig.add_trace(
+        go.Bar(x=weekly_users['week'], y=weekly_users['unique_users'],
+               name='Weekly Unique Users', marker_color='skyblue'),
+        row=2, col=1
+    )
+    
+    # 4. Hourly Usage Pattern
+    hourly_usage = df.groupby('hour').size().reset_index()
+    hourly_usage.columns = ['hour', 'interactions']
+    
+    fig.add_trace(
+        go.Bar(x=hourly_usage['hour'], y=hourly_usage['interactions'],
+               name='Hourly Usage', marker_color='lightcoral'),
+        row=2, col=2
+    )
+    
+    # 5. User Engagement
+    user_questions = df.groupby('user').size().reset_index()
+    user_questions.columns = ['user', 'question_count']
+    
+    fig.add_trace(
+        go.Histogram(x=user_questions['question_count'], name='Questions per User',
+                    marker_color='lightgreen'),
+        row=3, col=1
+    )
+    
+    # 6. Economic Impact Metrics
+    total_interactions = len(df)
+    unique_users = df['user'].nunique()
+    time_saved = (total_interactions * 15) / 60  # hours
+    economic_value = time_saved * 50  # assuming $50/hour
+    
+    metrics = ['Total Interactions', 'Unique Users', 'Time Saved (hrs)', 'Economic Value ($)']
+    values = [total_interactions, unique_users, time_saved, economic_value]
+    
+    fig.add_trace(
+        go.Bar(x=metrics, y=values, name='Key Metrics',
+               marker_color=['blue', 'green', 'orange', 'red']),
+        row=3, col=2
+    )
+    
+    fig.update_layout(height=1000, showlegend=False, 
+                     title_text="AI Chatbot Analytics Dashboard")
+    fig.write_html("interactive_dashboard.html")
+    fig.show()
+
+def generate_executive_summary(df):
+    """Generate a simple executive summary"""
+    
+    total_interactions = len(df)
+    unique_users = df['user'].nunique()
+    date_range = f"{df['created_date'].min().date()} to {df['created_date'].max().date()}"
+    
+    # Calculate key metrics
+    avg_questions_per_user = total_interactions / unique_users
+    most_active_day = df.groupby(df['created_date'].dt.day_name()).size().idxmax()
+    peak_hour = df.groupby('hour').size().idxmax()
+    top_category = df['question_category'].value_counts().index[0]
+    
+    # Economic impact
+    time_saved_hours = (total_interactions * 15) / 60
+    economic_value = time_saved_hours * 50
+    
+    # User satisfaction (if available)
+    satisfaction_rate = df['user_satisfaction'].mean() if 'user_satisfaction' in df.columns else None
+    
+    summary = f"""
+    AI Chatbot Usage Executive Summary
+    =====================================
+    
+    Period: {date_range}
+    
+    Key Metrics:
+    • Total Interactions: {total_interactions:,}
+    • Unique Users: {unique_users:,}
+    • Average Questions per User: {avg_questions_per_user:.1f}
+    • Most Active Day: {most_active_day}
+    • Peak Usage Hour: {peak_hour}:00
+    • Top Question Category: {top_category}
+    
+    Economic Impact:
+    • Estimated Time Saved: {time_saved_hours:.0f} hours
+    • Economic Value: ${economic_value:,.0f}
+    • Value per User: ${economic_value/unique_users:.0f}
+    
+    User Engagement:
+    • Power Users (5+ questions): {len(df.groupby('user').size()[df.groupby('user').size() >= 5])}
+    • Average Satisfaction: {satisfaction_rate:.1f}/5.0 if satisfaction_rate else 'Not Available'}
+    
+    Recommendations:
+    1. Focus on {top_category.lower()} category improvements
+    2. Optimize for {peak_hour}:00 peak usage time
+    3. Develop content for power users
+    4. Improve satisfaction measurement
+    """
+    
+    return summary
+
+# Simple usage example
+def quick_analysis():
+    """Quick analysis function for immediate insights"""
+    
+    # Load data
+    df = pd.read_csv('chatbot_usage.csv')
+    
+    # Basic preparation
+    df['created_date'] = pd.to_datetime(df['created_date'])
+    df['hour'] = df['created_date'].dt.hour
+    
+    # Simple rule-based categorization
+    def simple_categorize(question):
+        question = str(question).lower()
+        if any(word in question for word in ['how', 'tutorial', 'guide']):
+            return 'How-to'
+        elif any(word in question for word in ['error', 'issue', 'problem']):
+            return 'Support'
+        elif any(word in question for word in ['code', 'python', 'sql']):
+            return 'Technical'
+        elif any(word in question for word in ['what', 'explain', 'define']):
+            return 'Information'
+        else:
+            return 'Other'
+    
+    df['question_category'] = df['question'].apply(simple_categorize)
+    df['question_length'] = df['question'].str.len()
+    
+    # Print quick insights
+    print("Quick AI Chatbot Analytics")
+    print("=" * 30)
+    print(f"Total interactions: {len(df)}")
+    print(f"Unique users: {df['user'].nunique()}")
+    print(f"Date range: {df['created_date'].min().date()} to {df['created_date'].max().date()}")
+    print("\nTop question categories:")
+    print(df['question_category'].value_counts().head())
+    print(f"\nPeak usage hour: {df.groupby('hour').size().idxmax()}:00")
+    print(f"Most active day: {df.groupby(df['created_date'].dt.day_name()).size().idxmax()}")
+    
+    # Economic impact
+    time_saved = (len(df) * 15) / 60  # hours
+    economic_value = time_saved * 50
+    print(f"\nEstimated time saved: {time_saved:.0f} hours")
+    print(f"Economic value: ${economic_value:,.0f}")
+    
+    return df
+
+if __name__ == "__main__":
+    # Run quick analysis
+    df = quick_analysis()
+    
+    # Create visualizations
+    create_simple_dashboard(df)
+    create_interactive_dashboard(df)
+    
+    # Generate summary
+    summary = generate_executive_summary(df)
+    print(summary)
+    
+    # Save summary to file
+    with open('executive_summary.txt', 'w') as f:
+        f.write(summary)

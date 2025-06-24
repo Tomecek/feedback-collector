@@ -1,0 +1,116 @@
+import numpy as np
+from transformers import AutoTokenizer, AutoModel
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+import torch
+import matplotlib.pyplot as plt
+
+# Initialize the Czech BERT model
+model_name = "Seznam/small-e-czech"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModel.from_pretrained(model_name)
+
+def get_embeddings(texts):
+    """Get embeddings for a list of texts using Czech BERT"""
+    embeddings = []
+    
+    for text in texts:
+        # Tokenize and encode
+        inputs = tokenizer(text, return_tensors="pt", truncation=True, 
+                          padding=True, max_length=512)
+        
+        # Get embeddings
+        with torch.no_grad():
+            outputs = model(**inputs)
+        
+        # Use [CLS] token embedding (first token)
+        embedding = outputs.last_hidden_state[0][0].numpy()
+        embeddings.append(embedding)
+    
+    return np.array(embeddings)
+
+def cluster_questions(questions, n_clusters=5):
+    """Cluster questions based on their semantic similarity"""
+    # Get embeddings
+    print("Získávání embeddings...")
+    embeddings = get_embeddings(questions)
+    
+    # Perform clustering
+    print(f"Clustering do {n_clusters} skupin...")
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+    cluster_labels = kmeans.fit_predict(embeddings)
+    
+    return cluster_labels, embeddings
+
+def visualize_clusters(embeddings, labels, questions):
+    """Visualize clusters using PCA"""
+    # Reduce dimensions for visualization
+    pca = PCA(n_components=2)
+    embeddings_2d = pca.fit_transform(embeddings)
+    
+    # Plot
+    plt.figure(figsize=(12, 8))
+    scatter = plt.scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], 
+                         c=labels, cmap='tab10')
+    plt.colorbar(scatter)
+    plt.title('Clustering českých otázek chatbotu')
+    plt.xlabel('První komponenta PCA')
+    plt.ylabel('Druhá komponenta PCA')
+    
+    # Add question text as annotations (first few words)
+    for i, question in enumerate(questions):
+        short_text = ' '.join(question.split()[:3]) + '...'
+        plt.annotate(short_text, (embeddings_2d[i, 0], embeddings_2d[i, 1]), 
+                    fontsize=8, alpha=0.7)
+    
+    plt.tight_layout()
+    plt.show()
+
+def analyze_clusters(questions, labels):
+    """Analyze and display clusters"""
+    n_clusters = len(set(labels))
+    
+    for cluster_id in range(n_clusters):
+        cluster_questions = [q for q, l in zip(questions, labels) if l == cluster_id]
+        print(f"\n--- CLUSTER {cluster_id} ({len(cluster_questions)} otázek) ---")
+        for question in cluster_questions:
+            print(f"  • {question}")
+
+# Example Czech chatbot questions
+czech_questions = [
+    "Jak mohu zrušit svou objednávku?",
+    "Kdy mi dorazí balíček?",
+    "Kolik stojí doprava?",
+    "Můžu vrátit zboží?",
+    "Jaké jsou způsoby platby?",
+    "Kde najdu fakturační údaje?",
+    "Jak dlouho trvá doručení?",
+    "Můžu změnit adresu doručení?",
+    "Co dělat když mi nedorazil balíček?",
+    "Jak kontaktovat zákaznický servis?",
+    "Máte slevy pro studenty?",
+    "Jaká je záruka na produkty?",
+    "Jak fungiuje reklamace?",
+    "Můžu si objednat na dobírku?",
+    "Kde je nejbližší výdejní místo?",
+    "Jak založit uživatelský účet?",
+    "Zapomněl jsem heslo, co mám dělat?",
+    "Jak změnit osobní údaje?",
+    "Můžu smazat svůj účet?",
+    "Jak se přihlásit do aplikace?"
+]
+
+if __name__ == "__main__":
+    # Perform clustering
+    labels, embeddings = cluster_questions(czech_questions, n_clusters=4)
+    
+    # Analyze results
+    analyze_clusters(czech_questions, labels)
+    
+    # Visualize (optional - requires matplotlib)
+    try:
+        visualize_clusters(embeddings, labels, czech_questions)
+    except ImportError:
+        print("\nPro vizualizaci nainstalujte matplotlib: pip install matplotlib")
+    
+    print(f"\nCelkem zpracováno {len(czech_questions)} otázek do {len(set(labels))} clusterů.")
