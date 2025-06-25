@@ -1,0 +1,56 @@
+from sentence_transformers import SentenceTransformer
+from sklearn.cluster import KMeans
+import pandas as pd
+
+# Načti data (nebo nahraď vlastním CSV)
+queries = [
+    "Jak si změním heslo?",
+    "Kdy mám další směnu?",
+    "Jak se přihlásím do systému?",
+    "Kde najdu výplatní pásku?",
+    "Mohu si vzít dovolenou v červenci?",
+    "Jak nahlásím nemoc?",
+    "Kdy bude výplata?",
+    "Jak kontaktuji IT podporu?",
+    "Mám problém s přihlášením",
+    "Potřebuji změnit bankovní účet",
+    "Co mám dělat, když zapomenu heslo?",
+    "Jak funguje benefitní program?",
+    "Kolik dní dovolené mi zbývá?",
+    "Jak mohu požádat o home office?",
+    "Kde najdu manuál k systému?"
+]
+
+# Načtení předtrénovaného modelu pro češtinu
+model = SentenceTransformer("sentence-transformers/distiluse-base-multilingual-cased")
+embeddings = model.encode(queries)
+
+# KMeans klastrování
+kmeans = KMeans(n_clusters=5, random_state=42)
+labels = kmeans.fit_predict(embeddings)
+
+# Výpis výsledků
+df = pd.DataFrame({"query": queries, "cluster": labels})
+for cluster_id in sorted(df["cluster"].unique()):
+    print(f"\n🟩 Cluster {cluster_id}:")
+    print(df[df["cluster"] == cluster_id]["query"].to_string(index=False))
+    
+
+
+"""from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import AgglomerativeClustering
+
+# TF-IDF
+vectorizer = TfidfVectorizer()
+X = vectorizer.fit_transform(queries)
+
+# Hierarchické klastrování (bez předpokladu sférických clusterů)
+agglo = AgglomerativeClustering(n_clusters=7)
+labels = agglo.fit_predict(X.toarray())
+
+# Výpis výsledků
+df = pd.DataFrame({"query": queries, "cluster": labels})
+for cluster_id in sorted(df["cluster"].unique()):
+    print(f"\n🔷 Cluster {cluster_id}:")
+    print(df[df["cluster"] == cluster_id]["query"].to_string(index=False))
+"""
